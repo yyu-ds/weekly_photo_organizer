@@ -21,7 +21,8 @@ state = {
     'images': [],  # List of Path objects
     'weeks_data': {}, # Key: Week Number (0-52), Value: Path or None
     'dragged_image': None,
-    'drag_source': None # 'source' or int (week number)
+    'drag_source': None, # 'source' or int (week number)
+    'preview_image': None, # current preview path
 }
 
 # --- Helper Functions ---
@@ -113,9 +114,6 @@ def refresh_drawer_ui():
         left_drawer.classes('relative')
         
         # Overlay for drop indication or just handle on the container
-        def on_dragover(e):
-            e.sender.call_js('event.preventDefault()')
-            
         def on_drop(e):
             dragged = state['dragged_image']
             source = state['drag_source']
@@ -136,7 +134,6 @@ def refresh_drawer_ui():
                 refresh_drawer_ui()
                 ui.notify('Image returned to source')
 
-        left_drawer.on('dragover', on_dragover)
         left_drawer.on('drop', on_drop)
         # Client side prop for smooth drop
         left_drawer.props('ondragover="event.preventDefault()"')
@@ -150,7 +147,7 @@ def refresh_drawer_ui():
             for img_path in state['images']:
                 # Draggable Card
                 # Use a specific container for each to be neat
-                with ui.card().classes('p-0 cursor-move border-0 shadow-none bg-transparent') as card:
+                with ui.card().classes('p-0 cursor-move border-0 shadow-none bg-transparent relative group') as card:
                     card.props('draggable')
                     
                     def on_drag_start(e, p=img_path):
@@ -164,8 +161,18 @@ def refresh_drawer_ui():
                     date_str = c_date.strftime('%Y-%m-%d %H:%M')
                     
                     with ui.column().classes('w-full items-center p-0 gap-0'):
+                        # Image is standard, draggable via parent
                         ui.image(img_path).classes('w-full h-24 object-cover rounded')
+                        
                         ui.label(date_str).classes('text-[10px] text-gray-600 leading-tight text-center')
+
+                    # Zoom Icon Overlay
+                    # Use 'absolute' positioning
+                    with ui.icon('zoom_in', color='white').classes('absolute top-1 right-1 bg-black/50 rounded-full p-1 cursor-pointer hover:bg-blue-600 transition-colors') as zoom_btn:
+                         zoom_btn.on('click', lambda e, p=img_path: open_preview(p))
+                         # Prevent drag start on the icon itself
+                         # We only stop mousedown to prevent drag. We ALLOW click to bubble (or handling it here is enough).
+                         zoom_btn.props('draggable="false" onmousedown="event.stopPropagation()"')
 
 weeks_grid = None
 
@@ -307,6 +314,21 @@ app.add_static_files('/files', '/')
 
 with ui.column().classes('w-full h-screen p-0'):
     
+    # 0. Global Preview Overlay (Using ui.dialog for proper z-index)
+    with ui.dialog() as preview_dialog, ui.card().classes('p-0 bg-transparent border-0 shadow-none items-center justify-center w-full h-full'):
+        # Click background to close is default for dialog
+        preview_image_el = ui.image().classes('max-w-[90vw] max-h-[90vh] object-contain cursor-pointer')
+        preview_image_el.on('click', preview_dialog.close)
+        
+    def open_preview(path):
+        if state['dragged_image']: return
+        
+        if 'preview_dialog' in globals() and preview_dialog:
+            preview_image_el.set_source(str(path))
+            preview_dialog.open()
+        else:
+             ui.notify("Error: Preview dialog not initialized", type='negative')
+
     # 1. Header
     with ui.row().classes('w-full bg-blue-100 p-4 items-center gap-4'):
         ui.label('Weekly Photo Organizer').classes('text-xl font-bold text-blue-900')
