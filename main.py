@@ -1,6 +1,7 @@
 import os
 import shutil
 import datetime
+import subprocess
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
@@ -267,20 +268,40 @@ with ui.column().classes('w-full h-screen p-0'):
         ui.number(label='Year', value=state['year'], format='%.0f', 
                   on_change=lambda e: (state.update({'year': int(e.value)}), refresh_grid_ui())).classes('w-24')
         
-        # Changed to manual input due to tkinter/easygui issues on Mac
-        def set_folder(e):
-            val = e.sender.value
-            if os.path.isdir(val):
-                state['source_folder'] = val
-                load_images()
-            else:
-                ui.notify('Invalid directory path', type='negative')
 
-        folder_input = ui.input('Source Folder Path', on_change=set_folder).classes('w-96').props('clearable')
-        ui.tooltip('Paste the absolute path to your folder here e.g. /Users/name/Photos')
-        
-        # Removed button that required easygui
-        # ui.button('Select Source', icon='folder', on_click=choose_folder)
+        async def pick_folder():
+            # Use AppleScript to pick folder, works robustly on macOS without extra deps
+            try:
+                # Run async to avoid blocking UI loop
+                # Command: choose folder with prompt "Select Source Folder"
+                # 'POSIX path of' converts the AppleScript alias to standard path
+                
+                cmd = [
+                    "osascript", "-e",
+                    'return POSIX path of (choose folder with prompt "Select Source Folder")'
+                ]
+                
+                # Execute in executor to be safe with blocking IO
+                result = await app.loop.run_in_executor(
+                    None, 
+                    lambda: subprocess.run(cmd, capture_output=True, text=True)
+                )
+                
+                if result.returncode == 0:
+                    path = result.stdout.strip()
+                    if path:
+                        state['source_folder'] = path
+                        folder_input.value = path
+                        load_images()
+                else:
+                    # User cancelled (usually returncode 1) or error
+                    pass 
+                    
+            except Exception as e:
+                ui.notify(f"Error picking folder: {e}", type='negative')
+
+        folder_input = ui.input('Source Directory').classes('w-96').props('readonly')
+        ui.button('Select Source', icon='folder', on_click=pick_folder)
         
         ui.space()
         ui.button('Process & Rename', icon='save', on_click=process_and_organize).classes('bg-green-600')
