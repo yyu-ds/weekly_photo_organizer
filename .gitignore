@@ -24,3 +24,4 @@ venv/
 ENV/
 .DS_Store
 Sorted_*/
+temp_collages/

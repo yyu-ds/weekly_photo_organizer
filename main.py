@@ -7,19 +7,24 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 from nicegui import ui, app, native
-from PIL import Image, ExifTags
+from PIL import Image, ExifTags, ImageOps
 from pillow_heif import register_heif_opener
 # import easygui # Removed due to Mac tkinter issues
 
 # 1. Register HEIC opener
 register_heif_opener()
 
+# Import helper
+from collage_utils import generate_smart_collage
+
+
 # --- Global State ---
 state = {
     'year': datetime.date.today().year + 1,
     'source_folder': '',
     'images': [],  # List of Path objects
-    'weeks_data': {}, # Key: Week Number (0-52), Value: Path or None
+    'weeks_data': {}, # Key: Week Number (0-52), Value: Path or None (Display Image)
+    'weeks_originals': {}, # Key: Week Number, Value: List[Path] (Original Source Images)
     'dragged_image': None,
     'drag_source': None, # 'source' or int (week number)
     'preview_image': None, # current preview path
@@ -238,16 +243,39 @@ def refresh_grid_ui():
                         if dragged in state['images']:
                             state['images'].remove(dragged)
                             
-                        # 2. Remove from ANY other week
-                        # We use list() to safely iterate while modifying (though we modify by key)
+                        # 2. Remove from ANY other week (Handle single image moves)
+                        # NOTE: If we are accumulating, dragging FROM a week that has a collage... 
+                        # simpler to just assume we are dragging a SINGLE image from source for now as per "User Flow".
+                        # But if we drag from another week, we treat it as "moving that image".
+                        
                         for k, v in list(state['weeks_data'].items()):
                             if v == dragged and k != w:
                                 state['weeks_data'][k] = None
+                                # Remove from originals too if it was single? 
+                                # Complicated. Let's assume for now we only support 'Simple Move' or 'Source Drop'.
+                                if k in state['weeks_originals'] and dragged in state['weeks_originals'][k]:
+                                     state['weeks_originals'][k].remove(dragged)
+
+                        # 3. Add to New Week (Accumulate)
+                        current_originals = state['weeks_originals'].get(w, [])
                         
-                        # 3. Assign to New Week
-                        state['weeks_data'][w] = dragged
+                        # Avoid duplicates
+                        if dragged not in current_originals:
+                            current_originals.append(dragged)
+                            
+                        state['weeks_originals'][w] = current_originals
                         
-                        # 4. Global Refresh to ensure UI consistency
+                        # 4. Determine Display Image
+                        if len(current_originals) == 1:
+                            # Standard Single Image
+                            state['weeks_data'][w] = current_originals[0]
+                        else:
+                            # Generate Collage
+                            ui.notify(f'Generating collage for {len(current_originals)} images...')
+                            collage_path = generate_smart_collage(current_originals, Path(state['source_folder']))
+                            state['weeks_data'][w] = collage_path
+                        
+                        # 5. Global Refresh to ensure UI consistency
                         # This is slightly heavier but guarantees 0 duplication visual bugs
                         refresh_grid_ui()
                         refresh_drawer_ui()
