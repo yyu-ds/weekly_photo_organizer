@@ -2,6 +2,7 @@ import os
 import shutil
 import datetime
 import subprocess
+import asyncio
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
@@ -282,7 +283,8 @@ with ui.column().classes('w-full h-screen p-0'):
                 ]
                 
                 # Execute in executor to be safe with blocking IO
-                result = await app.loop.run_in_executor(
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(
                     None, 
                     lambda: subprocess.run(cmd, capture_output=True, text=True)
                 )
