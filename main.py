@@ -7,7 +7,7 @@ from typing import List, Dict, Optional, Tuple
 from nicegui import ui, app, native
 from PIL import Image, ExifTags
 from pillow_heif import register_heif_opener
-import easygui
+# import easygui # Removed due to Mac tkinter issues
 
 # 1. Register HEIC opener
 register_heif_opener()
@@ -267,8 +267,20 @@ with ui.column().classes('w-full h-screen p-0'):
         ui.number(label='Year', value=state['year'], format='%.0f', 
                   on_change=lambda e: (state.update({'year': int(e.value)}), refresh_grid_ui())).classes('w-24')
         
-        folder_input = ui.input('Source Directory').classes('w-96').props('readonly')
-        ui.button('Select Source', icon='folder', on_click=choose_folder)
+        # Changed to manual input due to tkinter/easygui issues on Mac
+        def set_folder(e):
+            val = e.sender.value
+            if os.path.isdir(val):
+                state['source_folder'] = val
+                load_images()
+            else:
+                ui.notify('Invalid directory path', type='negative')
+
+        folder_input = ui.input('Source Folder Path', on_change=set_folder).classes('w-96').props('clearable')
+        ui.tooltip('Paste the absolute path to your folder here e.g. /Users/name/Photos')
+        
+        # Removed button that required easygui
+        # ui.button('Select Source', icon='folder', on_click=choose_folder)
         
         ui.space()
         ui.button('Process & Rename', icon='save', on_click=process_and_organize).classes('bg-green-600')

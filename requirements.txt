@@ -1,4 +1,3 @@
 nicegui
 pillow
 pillow-heif
-easygui
