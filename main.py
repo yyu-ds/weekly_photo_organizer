@@ -20,7 +20,8 @@ state = {
     'source_folder': '',
     'images': [],  # List of Path objects
     'weeks_data': {}, # Key: Week Number (0-52), Value: Path or None
-    'dragged_image': None
+    'dragged_image': None,
+    'drag_source': None # 'source' or int (week number)
 }
 
 # --- Helper Functions ---
@@ -108,42 +109,63 @@ def refresh_drawer_ui():
     """Refreshes the left column with draggable image cards."""
     left_drawer.clear()
     with left_drawer:
+        # Source is also a Drop Zone for returning images
+        left_drawer.classes('relative')
+        
+        # Overlay for drop indication or just handle on the container
+        def on_dragover(e):
+            e.sender.call_js('event.preventDefault()')
+            
+        def on_drop(e):
+            dragged = state['dragged_image']
+            source = state['drag_source']
+            if dragged and source != 'source':
+                # Return to source
+                if dragged not in state['images']:
+                    state['images'].append(dragged)
+                    # Resort by date
+                    state['images'].sort(key=lambda x: get_image_creation_date(x))
+                
+                # Remove from week if it came from a week
+                if isinstance(source, int):
+                    state['weeks_data'][source] = None
+                    refresh_grid_ui()
+                
+                state['dragged_image'] = None
+                state['drag_source'] = None
+                refresh_drawer_ui()
+                ui.notify('Image returned to source')
+
+        left_drawer.on('dragover', on_dragover)
+        left_drawer.on('drop', on_drop)
+        # Client side prop for smooth drop
+        left_drawer.props('ondragover="event.preventDefault()"')
+
         if not state['images']:
-            ui.label('No images found or folder not selected.').classes('text-gray-400 italic')
+            ui.label('No images found or all assigned.').classes('text-gray-400 italic')
             return
             
-        for img_path in state['images']:
-            # Create a draggable card
-            with ui.card().classes('w-full mb-2 p-2 cursor-move') as card:
-                card.props('draggable') # HTML5 draggable
-                
-                # We need to hook into HTML draggable events slightly differently in NiceGUI 
-                # or use a pure logic approach.
-                # Actually, standard draggable props work best with some JS help or simply 
-                # tracking 'dragstart'.
-                
-                # Simplified Draggable: Click to select 'active' image for dropping?
-                # The user asked for "draggable".
-                # NiceGUI handles drag&drop via events.
-                
-                def on_drag_start(e, p=img_path):
-                    state['dragged_image'] = p
+        # Grid Layout
+        with ui.grid(columns=3).classes('w-full gap-2 p-1'): 
+            for img_path in state['images']:
+                # Draggable Card
+                # Use a specific container for each to be neat
+                with ui.card().classes('p-0 cursor-move border-0 shadow-none bg-transparent') as card:
+                    card.props('draggable')
                     
-                card.on('dragstart', on_drag_start)
-                
-                # Thumbnail
-                # We can serve local files directly or convert to base64. 
-                # app.add_static_files is safer for local desktop apps.
-                # For simplicity in this script, resolving to local file path helper.
-                
-                # Display Date
-                c_date = get_image_creation_date(img_path)
-                date_str = c_date.strftime('%Y-%m-%d %H:%M')
-                
-                with ui.column().classes('w-full items-center p-0 gap-1'):
-                    # Square thumbnail with date below
-                    ui.image(img_path).classes('w-32 h-32 object-cover rounded mx-auto')
-                    ui.label(date_str).classes('text-xs text-gray-600')
+                    def on_drag_start(e, p=img_path):
+                        state['dragged_image'] = p
+                        state['drag_source'] = 'source'
+                        
+                    card.on('dragstart', on_drag_start)
+                    
+                    # Display Date & Square Thumb
+                    c_date = get_image_creation_date(img_path)
+                    date_str = c_date.strftime('%Y-%m-%d %H:%M')
+                    
+                    with ui.column().classes('w-full items-center p-0 gap-0'):
+                        ui.image(img_path).classes('w-full h-24 object-cover rounded')
+                        ui.label(date_str).classes('text-[10px] text-gray-600 leading-tight text-center')
 
 weeks_grid = None
 
@@ -179,7 +201,13 @@ def refresh_grid_ui():
                 def render_assigned_image(img_p, container):
                     with container:
                         container.clear()
-                        ui.image(img_p).classes('w-full h-20 object-contain rounded')
+                        # Make assigned image draggable too (to move to another week or back source)
+                        with ui.image(img_p).classes('w-full h-20 object-contain rounded cursor-move') as img_el:
+                            img_el.props('draggable')
+                            def on_drag_start_assigned(e, p=img_p, w=week_num):
+                                state['dragged_image'] = p
+                                state['drag_source'] = w
+                            img_el.on('dragstart', on_drag_start_assigned)
                         
                 if current_img:
                     render_assigned_image(current_img, content_area)
@@ -194,17 +222,31 @@ def refresh_grid_ui():
                     
                 def on_drop(e, w=week_num, c=content_area):
                     dragged = state['dragged_image']
+                    source = state['drag_source']
+                    
                     if dragged:
+                        # 1. Update this week's data
                         state['weeks_data'][w] = dragged
                         render_assigned_image(dragged, c)
-                        ui.notify(f'Assigned to Week {w}')
                         
-                        # Remove from source list if it exists (check to avoid errors if double dropped)
-                        if dragged in state['images']:
-                            state['images'].remove(dragged)
-                            refresh_drawer_ui()
-                            
+                        # 2. Hnalde Source cleanup
+                        if source == 'source':
+                            # Coming from Left Panel
+                            if dragged in state['images']:
+                                state['images'].remove(dragged)
+                                refresh_drawer_ui()
+                        elif isinstance(source, int) and source != w:
+                            # Coming from another week
+                            # Clear the old week
+                            state['weeks_data'][source] = None
+                            # We need to refresh the grid to clear the old week visually
+                            # But refreshing the whole grid might be jarring/slow?
+                            # For simplicity, refreshing grid is safest.
+                            refresh_grid_ui()
+
+                        ui.notify(f'Assigned to Week {w}')
                         state['dragged_image'] = None
+                        state['drag_source'] = None
 
                 # drop_card.on('dragover', on_dragover) # Removed server-side handler
                 drop_card.on('drop', on_drop)
