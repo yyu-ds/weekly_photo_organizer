@@ -140,11 +140,9 @@ def refresh_drawer_ui():
                 c_date = get_image_creation_date(img_path)
                 date_str = c_date.strftime('%Y-%m-%d %H:%M')
                 
-                with ui.row().classes('no-wrap items-center'):
+                with ui.column().classes('w-full items-center p-0 gap-1'):
                     # Use a small thumbnail generation or simple scaling
-                    # For performance on many images, we'd want real thumbnails, 
-                    # but NiceGUI/browser handles resizing reasonably well for local.
-                    ui.image(img_path).classes('w-16 h-16 object-cover rounded mr-2')
+                    ui.image(img_path).classes('w-full h-24 object-cover rounded')
                     ui.label(date_str).classes('text-xs text-gray-600')
 
 weeks_grid = None
@@ -190,9 +188,9 @@ def refresh_grid_ui():
                         ui.icon('add_photo_alternate', size='2em', color='grey-300')
                 
                 # Drop Logic
-                def on_dragover(e):
-                    e.sender.call_js('event.preventDefault()') # Allow drop
-                    # e.sender.classes('border-blue-500', remove='border-gray-200') # Highlight
+                # Crucial: 'ondragover' must prevent default to allow dropping. 
+                # Doing this via props prevents server roundtrip latency issues.
+                drop_card.props('ondragover="event.preventDefault()"')
                     
                 def on_drop(e, w=week_num, c=content_area):
                     dragged = state['dragged_image']
@@ -204,7 +202,7 @@ def refresh_grid_ui():
                         # but usually one drop -> done.
                         state['dragged_image'] = None
 
-                drop_card.on('dragover', on_dragover)
+                # drop_card.on('dragover', on_dragover) # Removed server-side handler
                 drop_card.on('drop', on_drop)
                 
 
