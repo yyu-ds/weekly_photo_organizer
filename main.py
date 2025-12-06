@@ -141,8 +141,8 @@ def refresh_drawer_ui():
                 date_str = c_date.strftime('%Y-%m-%d %H:%M')
                 
                 with ui.column().classes('w-full items-center p-0 gap-1'):
-                    # Use a small thumbnail generation or simple scaling
-                    ui.image(img_path).classes('w-full h-24 object-cover rounded')
+                    # Square thumbnail with date below
+                    ui.image(img_path).classes('w-32 h-32 object-cover rounded mx-auto')
                     ui.label(date_str).classes('text-xs text-gray-600')
 
 weeks_grid = None
@@ -198,8 +198,12 @@ def refresh_grid_ui():
                         state['weeks_data'][w] = dragged
                         render_assigned_image(dragged, c)
                         ui.notify(f'Assigned to Week {w}')
-                        # No auto-clear of dragged_image to allow specific multi-drops if needed, 
-                        # but usually one drop -> done.
+                        
+                        # Remove from source list if it exists (check to avoid errors if double dropped)
+                        if dragged in state['images']:
+                            state['images'].remove(dragged)
+                            refresh_drawer_ui()
+                            
                         state['dragged_image'] = None
 
                 # drop_card.on('dragover', on_dragover) # Removed server-side handler
