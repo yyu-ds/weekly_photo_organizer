@@ -222,27 +222,28 @@ def refresh_grid_ui():
                     
                 def on_drop(e, w=week_num, c=content_area):
                     dragged = state['dragged_image']
-                    source = state['drag_source']
                     
                     if dragged:
-                        # 1. Update this week's data
-                        state['weeks_data'][w] = dragged
-                        render_assigned_image(dragged, c)
+                        # Improved Logic: Search and Remove "dragged" from ANYWHERE it currently is.
+                        # This eliminates "drag_source" state dependency which can be buggy.
                         
-                        # 2. Hnalde Source cleanup
-                        if source == 'source':
-                            # Coming from Left Panel
-                            if dragged in state['images']:
-                                state['images'].remove(dragged)
-                                refresh_drawer_ui()
-                        elif isinstance(source, int) and source != w:
-                            # Coming from another week
-                            # Clear the old week
-                            state['weeks_data'][source] = None
-                            # We need to refresh the grid to clear the old week visually
-                            # But refreshing the whole grid might be jarring/slow?
-                            # For simplicity, refreshing grid is safest.
-                            refresh_grid_ui()
+                        # 1. Remove from Source List
+                        if dragged in state['images']:
+                            state['images'].remove(dragged)
+                            
+                        # 2. Remove from ANY other week
+                        # We use list() to safely iterate while modifying (though we modify by key)
+                        for k, v in list(state['weeks_data'].items()):
+                            if v == dragged and k != w:
+                                state['weeks_data'][k] = None
+                        
+                        # 3. Assign to New Week
+                        state['weeks_data'][w] = dragged
+                        
+                        # 4. Global Refresh to ensure UI consistency
+                        # This is slightly heavier but guarantees 0 duplication visual bugs
+                        refresh_grid_ui()
+                        refresh_drawer_ui()
 
                         ui.notify(f'Assigned to Week {w}')
                         state['dragged_image'] = None
