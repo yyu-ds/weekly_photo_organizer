@@ -3,6 +3,7 @@ import shutil
 import datetime
 import subprocess
 import asyncio
+import json
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
@@ -16,6 +17,9 @@ register_heif_opener()
 
 # Import helper
 from collage_utils import generate_smart_collage
+
+# State file path for save/load functionality
+STATE_FILE_PATH = Path.home() / '.weekly_photo_organizer_state.json'
 
 
 # --- Global State ---
@@ -107,6 +111,78 @@ def choose_folder():
         state['source_folder'] = path
         folder_input.value = path
         load_images()
+
+def save_state():
+    """Saves current state to a JSON file for later resumption."""
+    try:
+        # Convert Path objects to strings for JSON serialization
+        save_data = {
+            'year': state['year'],
+            'source_folder': state['source_folder'],
+            'images': [str(p) for p in state['images']],
+            'weeks_data': {str(k): str(v) if v else None for k, v in state['weeks_data'].items()},
+            'weeks_originals': {str(k): [str(p) for p in v] for k, v in state['weeks_originals'].items()},
+        }
+        
+        with open(STATE_FILE_PATH, 'w') as f:
+            json.dump(save_data, f, indent=2)
+        
+        ui.notify('Progress saved successfully!', type='positive')
+    except Exception as e:
+        ui.notify(f'Error saving state: {e}', type='negative')
+
+def load_state():
+    """Loads state from JSON file and restores the session."""
+    global folder_input
+    
+    if not STATE_FILE_PATH.exists():
+        ui.notify('No saved session found.', type='warning')
+        return
+    
+    try:
+        with open(STATE_FILE_PATH, 'r') as f:
+            save_data = json.load(f)
+        
+        # Restore state
+        state['year'] = save_data.get('year', datetime.date.today().year + 1)
+        state['source_folder'] = save_data.get('source_folder', '')
+        state['images'] = [Path(p) for p in save_data.get('images', [])]
+        state['weeks_data'] = {int(k): Path(v) if v else None for k, v in save_data.get('weeks_data', {}).items()}
+        state['weeks_originals'] = {int(k): [Path(p) for p in v] for k, v in save_data.get('weeks_originals', {}).items()}
+        
+        # Update UI
+        if hasattr(folder_input, 'value'):
+            folder_input.value = state['source_folder']
+        
+        refresh_drawer_ui()
+        refresh_grid_ui()
+        
+        ui.notify('Session restored successfully!', type='positive')
+    except Exception as e:
+        ui.notify(f'Error loading state: {e}', type='negative')
+
+def reset_cell(week_num: int):
+    """Resets a week cell, returning all assigned photos back to the source panel."""
+    # Get all original images from this cell
+    originals = state['weeks_originals'].get(week_num, [])
+    
+    # Return them to state['images']
+    for img_path in originals:
+        if img_path not in state['images']:
+            state['images'].append(img_path)
+    
+    # Re-sort images by date
+    state['images'].sort(key=lambda x: get_image_creation_date(x))
+    
+    # Clear the cell
+    state['weeks_data'][week_num] = None
+    state['weeks_originals'][week_num] = []
+    
+    # Refresh UI
+    refresh_drawer_ui()
+    refresh_grid_ui()
+    
+    ui.notify(f'Week {week_num} reset')
 
 # --- UI Components ---
 
@@ -223,6 +299,10 @@ def refresh_grid_ui():
                         
                 if current_img:
                     render_assigned_image(current_img, content_area)
+                    # Add right-click context menu for reset
+                    with drop_card:
+                        with ui.context_menu():
+                            ui.menu_item('Reset Cell', on_click=lambda w=week_num: reset_cell(w))
                 else:
                     with content_area:
                         ui.icon('add_photo_alternate', size='2em', color='grey-300')
@@ -401,6 +481,8 @@ with ui.column().classes('w-full h-screen p-0'):
         ui.button('Select Source', icon='folder', on_click=pick_folder)
         
         ui.space()
+        ui.button('Save', icon='bookmark', on_click=save_state).classes('bg-yellow-600')
+        ui.button('Load', icon='restore', on_click=load_state).classes('bg-orange-600')
         ui.button('Process & Rename', icon='save', on_click=process_and_organize).classes('bg-green-600')
 
     # 2. Main Split Area
