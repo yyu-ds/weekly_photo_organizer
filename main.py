@@ -16,7 +16,8 @@ from pillow_heif import register_heif_opener
 register_heif_opener()
 
 # Import helper
-from collage_utils import generate_smart_collage
+# Import helper
+from collage_utils import generate_collage
 
 # State file path for save/load functionality
 STATE_FILE_PATH = Path.home() / '.weekly_photo_organizer_state.json'
@@ -31,7 +32,9 @@ state = {
     'weeks_originals': {}, # Key: Week Number, Value: List[Path] (Original Source Images)
     'dragged_image': None,
     'drag_source': None, # 'source' or int (week number)
+    'drag_source': None, # 'source' or int (week number)
     'preview_image': None, # current preview path
+    'weeks_collage_config': {}, # Key: Week Number, Value: {'spacing': int, 'slots': [configs...]}
 }
 
 # --- Helper Functions ---
@@ -122,6 +125,7 @@ def save_state():
             'images': [str(p) for p in state['images']],
             'weeks_data': {str(k): str(v) if v else None for k, v in state['weeks_data'].items()},
             'weeks_originals': {str(k): [str(p) for p in v] for k, v in state['weeks_originals'].items()},
+            'weeks_collage_config': {str(k): v for k, v in state.get('weeks_collage_config', {}).items()},
         }
         
         with open(STATE_FILE_PATH, 'w') as f:
@@ -150,6 +154,13 @@ def load_state():
         state['weeks_data'] = {int(k): Path(v) if v else None for k, v in save_data.get('weeks_data', {}).items()}
         state['weeks_originals'] = {int(k): [Path(p) for p in v] for k, v in save_data.get('weeks_originals', {}).items()}
         
+        # Restore collage config
+        # Just direct copy for now since it is basic types (int, float, dict)
+        if 'weeks_collage_config' in save_data:
+             state['weeks_collage_config'] = {int(k): v for k, v in save_data['weeks_collage_config'].items()}
+        else:
+             state['weeks_collage_config'] = {}
+
         # Update UI
         if hasattr(folder_input, 'value'):
             folder_input.value = state['source_folder']
@@ -176,13 +187,28 @@ def reset_cell(week_num: int):
     
     # Clear the cell
     state['weeks_data'][week_num] = None
+    state['weeks_data'][week_num] = None
     state['weeks_originals'][week_num] = []
+    if week_num in state['weeks_collage_config']:
+        del state['weeks_collage_config'][week_num]
     
     # Refresh UI
     refresh_drawer_ui()
     refresh_grid_ui()
     
     ui.notify(f'Week {week_num} reset')
+
+
+def remove_image_from_source(img_path: Path):
+    """Removes an image from the source list (but not from disk)."""
+    if img_path in state['images']:
+        state['images'].remove(img_path)
+        # Also clear any selection or drag state if needed
+        if state['dragged_image'] == img_path:
+            state['dragged_image'] = None
+            state['drag_source'] = None
+        refresh_drawer_ui()
+        ui.notify('Image removed from list')
 
 # --- UI Components ---
 
@@ -255,6 +281,11 @@ def refresh_drawer_ui():
                          # We only stop mousedown to prevent drag. We ALLOW click to bubble (or handling it here is enough).
                          zoom_btn.props('draggable="false" onmousedown="event.stopPropagation()"')
 
+                    # Context Menu for Delete
+                    with card:
+                        with ui.context_menu():
+                            ui.menu_item('Delete', on_click=lambda p=img_path: remove_image_from_source(p))
+
 weeks_grid = None
 
 @ui.refreshable
@@ -303,6 +334,9 @@ def refresh_grid_ui():
                     with drop_card:
                         with ui.context_menu():
                             ui.menu_item('Reset Cell', on_click=lambda w=week_num: reset_cell(w))
+                            # Add Adjust Collage Option if multi-image
+                            if week_num in state['weeks_originals'] and len(state['weeks_originals'][week_num]) > 1:
+                                ui.menu_item('Adjust Collage', on_click=lambda w=week_num: open_collage_editor(w))
                 else:
                     with content_area:
                         ui.icon('add_photo_alternate', size='2em', color='grey-300')
@@ -352,7 +386,14 @@ def refresh_grid_ui():
                         else:
                             # Generate Collage
                             ui.notify(f'Generating collage for {len(current_originals)} images...')
-                            collage_path = generate_smart_collage(current_originals, Path(state['source_folder']))
+                            
+                            # Clean up old config if we are effectively resetting/adding
+                            # Actually, should we preserve config? If adding a new image, layout changes.
+                            # Simpler to reset config on drop.
+                            if w in state['weeks_collage_config']:
+                                del state['weeks_collage_config'][w]
+                                
+                            collage_path = generate_collage(current_originals, Path(state['source_folder']))
                             state['weeks_data'][w] = collage_path
                         
                         # 5. Global Refresh to ensure UI consistency
@@ -436,6 +477,324 @@ with ui.column().classes('w-full h-screen p-0'):
             preview_dialog.open()
         else:
              ui.notify("Error: Preview dialog not initialized", type='negative')
+
+    # --- Collage Editor ---
+    from nicegui.events import MouseEventArguments, ValueChangeEventArguments
+    
+    # We maintain a reference to the active editor state
+    editor_state = {
+        'week_num': None,
+        'images': [], # list of paths
+        'temp_configs': [], # list of {zoom, center_x, center_y}
+        'spacing': 0,
+        'dialog': None,
+        'image_elements': [], # UI references to update styles
+        'dragging_idx': None,
+        'drag_start': (0, 0), # x, y
+        'current_pan': [], # (tx, ty) for each slot
+    }
+    
+    async def open_collage_editor(week_num):
+        """Opens the interactive collage editor for a specific week."""
+        ui.notify('Opening editor...')
+        
+        originals = state['weeks_originals'].get(week_num, [])
+        if not originals or len(originals) < 2:
+            ui.notify('Not enough images to edit collage')
+            return
+            
+        config = state['weeks_collage_config'].get(week_num, {})
+        
+        # Init State
+        editor_state['week_num'] = week_num
+        editor_state['images'] = originals
+        editor_state['spacing'] = config.get('spacing', 0)
+        
+        # Deep copy slots or init defaults
+        existing_slots = config.get('slots', [])
+        
+        editor_state['temp_configs'] = []
+        editor_state['current_pan'] = []
+        
+        # Calculate in thread to avoid blocking
+        loop = asyncio.get_running_loop()
+        
+        async def calculate_pan(idx, img_path, cfg):
+            try:
+                def _get_size():
+                    with Image.open(img_path) as img:
+                        return img.size
+                
+                w, h = await loop.run_in_executor(None, _get_size)
+                
+                zoom = cfg['zoom']
+                cx = cfg['center_x']
+                cy = cfg['center_y']
+                
+                # Logic: tx = (0.5 - cx) * w 
+                # (We don't multiply by zoom here because CSS scale handles that separately?)
+                # Actually, if we scale, the translation is also scaled if applied before?
+                # CSS: transform: translate(tx, ty) scale(zoom).
+                # Matrix: Translate first, then Scale. 
+                # So tx is in unscaled pixels.
+                tx = (0.5 - cx) * w 
+                ty = (0.5 - cy) * h
+                return [tx, ty]
+            except Exception as e:
+                print(f"Error reading image {img_path}: {e}")
+                return [0, 0]
+
+        for i in range(len(originals)):
+            if i < len(existing_slots):
+                cfg = existing_slots[i].copy()
+            else:
+                cfg = {'center_x': 0.5, 'center_y': 0.5, 'zoom': 1.0}
+            editor_state['temp_configs'].append(cfg)
+            
+            pan = await calculate_pan(i, originals[i], cfg)
+            editor_state['current_pan'].append(pan)
+
+        render_editor_content.refresh()
+        if 'editor_dialog' in locals() or 'editor_dialog' in globals():
+             editor_dialog.open()
+        elif editor_state['dialog']:
+             editor_state['dialog'].open()
+
+    def render_editor_layout(container):
+        with container:
+            qty = len(editor_state['images'])
+            spacing = editor_state['spacing']
+            
+            # Reset UI refs
+            editor_state['image_elements'] = [None] * qty
+            
+            # Fixed aspect ratio container 4:3
+            # We used 1600x1200. Let's use 800x600 px for editor, or % based.
+            # Using specific px makes translation math easier.
+            W_preview = 800
+            H_preview = 600
+            
+            with ui.element('div').style(f'width: {W_preview}px; height: {H_preview}px; background: white; position: relative;') as canvas:
+                
+                # Helper to create slot div
+                def create_slot(idx, x, y, w, h):
+                    with ui.element('div').style(f'position: absolute; left: {x}px; top: {y}px; width: {w}px; height: {h}px; overflow: hidden; border: 1px solid #ddd;') as slot:
+                        # Event handlers on the SLOT (container) to handle mouse events
+                        
+                        img_path = editor_state['images'][idx]
+                        tx, ty = editor_state['current_pan'][idx]
+                        zoom = editor_state['temp_configs'][idx]['zoom']
+                        
+                        # Fix visibility: convert path to served URL
+                        # app.add_static_files('/files', '/') maps root.
+                        # Using /files + absolute path should work robustly.
+                        # Also handle Windows paths if needed, but User is on Mac.
+                        src_url = f"/files{img_path}"
+                        
+                        # Image inside
+                        im = ui.image(src_url).classes('w-full h-full object-cover').style(f'transform: translate({tx}px, {ty}px) scale({zoom}); transform-origin: center center; cursor: grab;')
+                        im.props('draggable="false"') # Prevent native ghost drag
+                        
+                        # DEBUG: Visual fallback if image missing
+                        with im:
+                             ui.label(f"IMG {idx}").classes('bg-white text-xs opacity-50 absolute top-0 left-0')
+                        im.props('draggable="false"') # Prevent native ghost drag
+                        
+                        editor_state['image_elements'][idx] = im
+
+                        # Interaction Handlers
+                        def handle_mousedown(e: MouseEventArguments, i=idx):
+                            editor_state['dragging_idx'] = i
+                            editor_state['drag_start'] = (e.client_x, e.client_y)
+                            
+                        def handle_mousemove(e: MouseEventArguments):
+                            # Throttle?
+                            i = editor_state['dragging_idx']
+                            if i is not None:
+                                dx = e.client_x - editor_state['drag_start'][0]
+                                dy = e.client_y - editor_state['drag_start'][1]
+                                
+                                # Update Pan
+                                c_pan = editor_state['current_pan'][i]
+                                c_pan[0] += dx
+                                c_pan[1] += dy
+                                
+                                editor_state['drag_start'] = (e.client_x, e.client_y)
+                                
+                                # Update UI
+                                update_slot_transform(i)
+                        
+                        def handle_mouseup(e: MouseEventArguments):
+                            editor_state['dragging_idx'] = None
+
+                        # Scroll for Zoom
+                        # Note: NiceGUI implementation of 'wheel' might be tricky on all elements.
+                        # check modifiers for Cmd/Ctrl
+                        async def handle_wheel(e: MouseEventArguments, i=idx):
+                            # e.delta_y
+                            if e.modifiers.ctrl or e.modifiers.meta: # Meta is Cmd on Mac
+                                # Zoom
+                                current_zoom = editor_state['temp_configs'][i]['zoom']
+                                # Zoom factor
+                                factor = 0.95 if e.delta_y > 0 else 1.05
+                                new_zoom = max(0.1, min(5.0, current_zoom * factor))
+                                editor_state['temp_configs'][i]['zoom'] = new_zoom
+                                update_slot_transform(i)
+                        
+                        # Bind events to the SLOT container for easier catching, or Image?
+                        # Image is better as it is the target.
+                        im.on('mousedown', handle_mousedown)
+                        # Mouse move needs to be on global or dialog? 
+                        # Ideally on the image, but if we drag fast we lose it.
+                        # Put mouseup/move on the main dialog card or document?
+                        # For now put on Image, but user has to be careful.
+                        # Better: Put move/up on the canvas or slot.
+                        slot.on('mousemove', handle_mousemove)
+                        slot.on('mouseup', handle_mouseup)
+                        slot.on('mouseleave', handle_mouseup) # Safety
+                        # Wheel on slot
+                        slot.on('wheel', lambda e, i=idx: handle_wheel(e, i)) 
+                        # Prevent default scroll behavior logic is hard in pure python event unless we use client script.
+                        # slot.on('wheel.prevent', ...)
+                        
+                        
+                # Define Geometry based on Qty & Spacing
+                # Note: We scale Spacing down by 0.5 (800 vs 1600)
+                sp = spacing / 2.0 
+                
+                if qty == 2:
+                    w = (W_preview - sp) / 2
+                    create_slot(0, 0, 0, w, H_preview)
+                    create_slot(1, w + sp, 0, w, H_preview)
+                elif qty == 3:
+                    w_left = (W_preview - sp) / 2
+                    h_top = (H_preview - sp) / 2
+                    create_slot(0, 0, 0, w_left, H_preview)
+                    create_slot(1, w_left + sp, 0, w_left, h_top)
+                    create_slot(2, w_left + sp, h_top + sp, w_left, h_top)
+                elif qty >= 4:
+                     w = (W_preview - sp) / 2
+                     h = (H_preview - sp) / 2
+                     create_slot(0, 0, 0, w, h)
+                     create_slot(1, w + sp, 0, w, h)
+                     create_slot(2, 0, h + sp, w, h)
+                     create_slot(3, w + sp, h + sp, w, h)
+
+    def update_slot_transform(idx):
+        im_el = editor_state['image_elements'][idx]
+        if im_el:
+            tx, ty = editor_state['current_pan'][idx]
+            z = editor_state['temp_configs'][idx]['zoom']
+            im_el.style(f'transform: translate({tx}px, {ty}px) scale({z}); transform-origin: center center;')
+    
+    async def save_collage_edits():
+        ui.notify('Saving collage...')
+        w_num = editor_state['week_num']
+        originals = editor_state['images']
+        
+        # 1. Convert Pan/Zoom back to normalized CenterX/Y
+        final_configs = []
+        for i, config_data in enumerate(editor_state['temp_configs']):
+            tx, ty = editor_state['current_pan'][i]
+            zoom = config_data['zoom']
+            
+            # Need Image Dimensions
+            # We assume the image loaded in slot is roughly "covered".
+            # The reverse math: tx = (0.5 - cx) * W_img
+            # So cx = 0.5 - (tx / W_img)
+            # We need to open image again to know W/H.
+            try:
+                with Image.open(originals[i]) as img:
+                    orig_w, orig_h = img.size
+                    
+                    # Correction:
+                    # Our preview is scaled down. 1600x1200 -> 800x600 (0.5 scale).
+                    # The tx, ty we have are in PREVIEW pixels.
+                    # We need to scale them UP to match full resolution if we use full res W_img.
+                    # Scale Factor = 2.0.
+                    
+                    real_tx = tx * 2.0
+                    real_ty = ty * 2.0
+                    
+                    # BUT: CSS translate applies to the element. 
+                    # If we have `object-cover` in HTML `img`, the image is resized to the slot.
+                    # The translation moves the *img element itself* or the *content*?
+                    # `ui.image` creates an `img` tag. 
+                    # `object-fit: cover` makes the image fill the box.
+                    # `transform` moves the *whole box*? 
+                    # If we move the whole box, we are seeing outside the slot (because slot has overflow-hidden).
+                    # So yes, we are moving the image relative to the viewing window.
+                    
+                    # MATH:
+                    # If I move 10px in preview, that corresponds to moving the center 10px.
+                    # But 10px in preview (which is 800px wide total) is 1/80 of width.
+                    # In real image (1600px wide total), it is 20px.
+                    # So yes, Scale Factor 2.0 applies.
+                    
+                    cx = 0.5 - (real_tx / orig_w)
+                    cy = 0.5 - (real_ty / orig_h)
+                    
+                    final_configs.append({
+                        'center_x': cx,
+                        'center_y': cy,
+                        'zoom': zoom
+                    })
+            except Exception as e:
+                print(f"Error calcing config for {i}: {e}")
+                final_configs.append({'center_x': 0.5, 'center_y': 0.5, 'zoom': 1.0})
+        
+        # 2. Update State
+        state['weeks_collage_config'][w_num] = {
+            'spacing': editor_state['spacing'],
+            'slots': final_configs
+        }
+        
+        # 3. Regenerate
+        collage_path = generate_collage(
+            originals, 
+            Path(state['source_folder']), 
+            spacing=state['weeks_collage_config'][w_num]['spacing'],
+            slot_configs=final_configs
+        )
+        state['weeks_data'][w_num] = collage_path
+        
+        refresh_grid_ui()
+        if editor_state['dialog']:
+            editor_state['dialog'].close()
+        ui.notify('Collage updated!')
+
+    # 3. Define the Dialog ONCE (Global Scope in layout)
+    with ui.dialog() as editor_dialog, ui.card().classes('w-full max-w-7xl h-[90vh] p-0 flex flex-col'):
+         editor_state['dialog'] = editor_dialog
+         
+         # Header
+         with ui.row().classes('w-full bg-gray-100 p-2 items-center justify-between'):
+             ui.label('Adjust Collage (Drag to Pan, Cmd+Scroll to Zoom)').classes('font-bold')
+             with ui.row().classes('gap-2'):
+                 ui.button('Cancel', on_click=editor_dialog.close).classes('bg-red-400')
+                 ui.button('Save', on_click=save_collage_edits).classes('bg-green-600')
+         
+         # Refreshable Content Area
+         @ui.refreshable
+         def render_editor_content():
+             # Controls
+             with ui.row().classes('px-4 py-2 gap-4 items-center'):
+                 ui.label('Frame Spacing:')
+                 def update_spacing(e):
+                     editor_state['spacing'] = int(e.value)
+                     render_editor_content.refresh()
+                     
+                 ui.slider(min=0, max=50, value=editor_state['spacing'], on_change=update_spacing).classes('w-48')
+
+             # Canvas Area
+             # 1. Ensure refreshable container fills space
+             # 2. Add border to verify visibility
+             with ui.element('div').classes('w-full flex-grow relative bg-gray-200 overflow-hidden flex items-center justify-center') as container:
+                 render_editor_layout(container)
+                 
+         with ui.column().classes('w-full flex-grow p-0 gap-0'):
+             render_editor_content()
+
 
     # 1. Header
     with ui.row().classes('w-full bg-blue-100 p-4 items-center gap-4'):
