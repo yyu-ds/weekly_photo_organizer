@@ -4,10 +4,10 @@ A desktop app for organizing photos into a 53-week yearly calendar. Drag photos 
 
 ## Features
 
-- **Drag & drop** photos onto weekly slots (supports JPG, PNG, HEIC/HEIF)
+- **Drag & drop** photos onto weekly slots (supports JPG, PNG, HEIC/HEIF); drag a photo back to the source panel to unassign it
 - **Auto collage** — dropping 2–4 photos on a week generates a composite image (2-up, 3-up, or 2×2 grid)
-- **Collage editor** — pan and zoom each slot independently; adjust spacing between frames
-- **EXIF-aware sorting** — source photos sorted by capture date (falls back to file modification time)
+- **Collage editor** — right-click a multi-photo week → *Adjust Collage*: drag a photo to pan, Cmd/Ctrl+scroll to zoom, slider for frame spacing; saving also refreshes that week's exported file if it already exists
+- **EXIF-aware** — source photos sorted by capture date (falls back to file modification time); rotation is applied so portrait phone photos export upright
 - **Save / Load session** — persists work to `~/.weekly_photo_organizer_state.json`
 - **Export** — converts assigned weeks to `001.jpg`–`053.jpg` in a `Sorted_<year>/` subfolder
 
@@ -19,21 +19,24 @@ A desktop app for organizing photos into a 53-week yearly calendar. Drag photos 
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
 ## Usage
 
 ```bash
-python main.py
+.venv/bin/python main.py
 ```
 
 1. Set the **Year** in the header.
 2. Click **Select Source** to choose a folder of photos.
 3. Drag photos from the left panel onto week cards on the right.
 4. Right-click a week card to **Reset** it or **Adjust Collage** (for multi-photo weeks).
+   In the editor: drag to pan, Cmd+scroll to zoom, then **Save**.
 5. Click **Save** to checkpoint progress; **Load** to restore a previous session.
 6. Click **Process & Rename** to export all assigned weeks to `Sorted_<year>/`.
+   Collage adjustments made after an export update the exported file automatically.
 
 ## Project Structure
 

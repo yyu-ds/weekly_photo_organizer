@@ -1,6 +1,6 @@
+import uuid
 from pathlib import Path
 from typing import List, Optional, Dict
-import datetime
 from PIL import Image, ImageOps
 
 def generate_collage(image_paths: List[Path], output_folder: Path, spacing: int = 0, slot_configs: List[Dict] = None) -> Optional[Path]:
@@ -38,9 +38,12 @@ def generate_collage(image_paths: List[Path], output_folder: Path, spacing: int 
     # Helper to apply crop & zoom
     def process_image_for_slot(img_path, target_w, target_h, config):
         img = Image.open(img_path)
-        
+
+        # Apply EXIF rotation so portrait phone photos aren't sideways
+        img = ImageOps.exif_transpose(img)
+
         # Convert to RGB if needed
-        if img.mode in ('RGBA', 'P'):
+        if img.mode != 'RGB':
             img = img.convert('RGB')
             
         cx = config.get('center_x', 0.5)
@@ -188,8 +191,9 @@ def generate_collage(image_paths: List[Path], output_folder: Path, spacing: int 
     temp_dir = output_folder / 'temp_collages'
     temp_dir.mkdir(exist_ok=True)
     
-    # Unique name using timestamp
-    filename = f"collage_{int(datetime.datetime.now().timestamp())}.jpg"
+    # Unique name; a timestamp would collide (and look cached/stale in the UI)
+    # when the collage is regenerated twice within the same second
+    filename = f"collage_{uuid.uuid4().hex[:12]}.jpg"
     out_path = temp_dir / filename
     
     canvas.save(out_path, quality=90)

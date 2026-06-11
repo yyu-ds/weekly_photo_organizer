@@ -16,7 +16,6 @@ from pillow_heif import register_heif_opener
 register_heif_opener()
 
 # Import helper
-# Import helper
 from collage_utils import generate_collage
 
 # State file path for save/load functionality
@@ -32,29 +31,47 @@ state = {
     'weeks_originals': {}, # Key: Week Number, Value: List[Path] (Original Source Images)
     'dragged_image': None,
     'drag_source': None, # 'source' or int (week number)
-    'drag_source': None, # 'source' or int (week number)
     'preview_image': None, # current preview path
     'weeks_collage_config': {}, # Key: Week Number, Value: {'spacing': int, 'slots': [configs...]}
 }
 
 # --- Helper Functions ---
 
+_creation_date_cache: Dict[Path, datetime.datetime] = {}
+
 def get_image_creation_date(file_path: Path) -> datetime.datetime:
     """Extracts creation date from EXIF or falls back to file modification time."""
+    cached = _creation_date_cache.get(file_path)
+    if cached:
+        return cached
+
+    result = None
     try:
-        image = Image.open(file_path)
-        exif = image.getexif()
-        # 36867 is DateTimeOriginal, 306 is DateTime
-        date_str = exif.get(36867) or exif.get(306)
-        
+        with Image.open(file_path) as image:
+            exif = image.getexif()
+            # 36867 (DateTimeOriginal) lives in the Exif sub-IFD; 306 (DateTime) in IFD0
+            date_str = exif.get_ifd(0x8769).get(36867) or exif.get(306)
+
         if date_str:
-            return datetime.datetime.strptime(date_str, '%Y:%m:%d %H:%M:%S')
+            result = datetime.datetime.strptime(date_str, '%Y:%m:%d %H:%M:%S')
     except Exception as e:
         print(f"Error reading EXIF for {file_path.name}: {e}")
-    
-    # Fallback to file creation/modification time
-    stat = file_path.stat()
-    return datetime.datetime.fromtimestamp(stat.st_mtime)
+
+    if result is None:
+        # Fallback to file modification time
+        result = datetime.datetime.fromtimestamp(file_path.stat().st_mtime)
+
+    _creation_date_cache[file_path] = result
+    return result
+
+def get_display_size(file_path: Path) -> Tuple[int, int]:
+    """Image size after EXIF rotation (swaps w/h for rotated photos), without decoding pixels."""
+    with Image.open(file_path) as img:
+        w, h = img.size
+        orientation = img.getexif().get(0x0112, 1)
+    if orientation in (5, 6, 7, 8):
+        w, h = h, w
+    return w, h
 
 def get_weeks_for_year(year: int) -> List[Tuple[datetime.date, datetime.date]]:
     """
@@ -93,7 +110,7 @@ def load_images():
         ui.notify('Invalid source folder')
         return
 
-    supported_exts = {'.jpg', '.jpeg', '.png', '.heic', '.hif', '.hiff'}
+    supported_exts = {'.jpg', '.jpeg', '.png', '.heic', '.heif', '.hif'}
     files = [
         p for p in Path(folder).iterdir() 
         if p.is_file() and p.suffix.lower() in supported_exts
@@ -108,12 +125,46 @@ def load_images():
     state['images'] = [x[0] for x in files_with_dates]
     refresh_drawer_ui()
 
-def choose_folder():
-    path = easygui.diropenbox(title="Select Source Folder")
-    if path:
-        state['source_folder'] = path
-        folder_input.value = path
-        load_images()
+def clear_drag_state():
+    state['dragged_image'] = None
+    state['drag_source'] = None
+
+def refresh_week_display(week_num: int):
+    """Recomputes a week's display image from its assigned originals."""
+    originals = state['weeks_originals'].get(week_num, [])
+    if not originals:
+        state['weeks_data'][week_num] = None
+        state['weeks_collage_config'].pop(week_num, None)
+    elif len(originals) == 1:
+        state['weeks_data'][week_num] = originals[0]
+        state['weeks_collage_config'].pop(week_num, None)
+    else:
+        config = state['weeks_collage_config'].get(week_num, {})
+        state['weeks_data'][week_num] = generate_collage(
+            originals,
+            Path(state['source_folder']),
+            spacing=config.get('spacing', 0),
+            slot_configs=config.get('slots'),
+        )
+
+# Editor preview canvas: same 4:3 ratio as the 1600x1200 collage output,
+# small enough to fit the 1200x800 native window without clipping
+EDITOR_W, EDITOR_H = 720, 540
+PREVIEW_SCALE = EDITOR_W / 1600.0
+
+def get_editor_slot_dims(qty: int, spacing: int, idx: int) -> Tuple[float, float]:
+    """Slot size (w, h) in editor-preview pixels, mirroring the collage layouts."""
+    sp = spacing * PREVIEW_SCALE  # spacing is in collage pixels
+    if qty == 2:
+        return ((EDITOR_W - sp) / 2, EDITOR_H)
+    if qty == 3:
+        w = (EDITOR_W - sp) / 2
+        if idx == 0:
+            return (w, EDITOR_H)
+        return (w, (EDITOR_H - sp) / 2)
+    if qty >= 4:
+        return ((EDITOR_W - sp) / 2, (EDITOR_H - sp) / 2)
+    return (EDITOR_W, EDITOR_H)
 
 def save_state():
     """Saves current state to a JSON file for later resumption."""
@@ -137,8 +188,8 @@ def save_state():
 
 def load_state():
     """Loads state from JSON file and restores the session."""
-    global folder_input
-    
+    global folder_input, year_input
+
     if not STATE_FILE_PATH.exists():
         ui.notify('No saved session found.', type='warning')
         return
@@ -164,7 +215,9 @@ def load_state():
         # Update UI
         if hasattr(folder_input, 'value'):
             folder_input.value = state['source_folder']
-        
+        if hasattr(year_input, 'value'):
+            year_input.value = state['year']
+
         refresh_drawer_ui()
         refresh_grid_ui()
         
@@ -187,11 +240,9 @@ def reset_cell(week_num: int):
     
     # Clear the cell
     state['weeks_data'][week_num] = None
-    state['weeks_data'][week_num] = None
     state['weeks_originals'][week_num] = []
-    if week_num in state['weeks_collage_config']:
-        del state['weeks_collage_config'][week_num]
-    
+    state['weeks_collage_config'].pop(week_num, None)
+
     # Refresh UI
     refresh_drawer_ui()
     refresh_grid_ui()
@@ -225,19 +276,31 @@ def refresh_drawer_ui():
             dragged = state['dragged_image']
             source = state['drag_source']
             if dragged and source != 'source':
-                # Return to source
-                if dragged not in state['images']:
-                    state['images'].append(dragged)
-                    # Resort by date
-                    state['images'].sort(key=lambda x: get_image_creation_date(x))
-                
-                # Remove from week if it came from a week
+                # Figure out what to return. Dragging a collage thumbnail
+                # (a generated temp file, not one of the originals) returns
+                # all of that week's photos.
+                returned = [dragged]
                 if isinstance(source, int):
-                    state['weeks_data'][source] = None
+                    originals = state['weeks_originals'].get(source, [])
+                    if originals and dragged not in originals:
+                        returned = list(originals)
+                    for img in returned:
+                        if img in originals:
+                            originals.remove(img)
+                    refresh_week_display(source)
                     refresh_grid_ui()
-                
-                state['dragged_image'] = None
-                state['drag_source'] = None
+
+                # Return to source (never the generated collage file itself)
+                changed = False
+                for img in returned:
+                    if img not in state['images'] and img.parent.name != 'temp_collages':
+                        state['images'].append(img)
+                        changed = True
+                if changed:
+                    # Resort by date
+                    state['images'].sort(key=get_image_creation_date)
+
+                clear_drag_state()
                 refresh_drawer_ui()
                 ui.notify('Image returned to source')
 
@@ -260,8 +323,11 @@ def refresh_drawer_ui():
                     def on_drag_start(e, p=img_path):
                         state['dragged_image'] = p
                         state['drag_source'] = 'source'
-                        
+
                     card.on('dragstart', on_drag_start)
+                    # Clear drag state even if the drop never lands on a target,
+                    # otherwise the zoom preview stays blocked
+                    card.on('dragend', lambda e: clear_drag_state())
                     
                     # Display Date & Square Thumb
                     c_date = get_image_creation_date(img_path)
@@ -327,6 +393,7 @@ def refresh_grid_ui():
                                 state['dragged_image'] = p
                                 state['drag_source'] = w
                             img_el.on('dragstart', on_drag_start_assigned)
+                            img_el.on('dragend', lambda e: clear_drag_state())
                         
                 if current_img:
                     render_assigned_image(current_img, content_area)
@@ -348,62 +415,55 @@ def refresh_grid_ui():
                     
                 def on_drop(e, w=week_num, c=content_area):
                     dragged = state['dragged_image']
-                    
+
                     if dragged:
-                        # Improved Logic: Search and Remove "dragged" from ANYWHERE it currently is.
-                        # This eliminates "drag_source" state dependency which can be buggy.
-                        
-                        # 1. Remove from Source List
-                        if dragged in state['images']:
-                            state['images'].remove(dragged)
-                            
-                        # 2. Remove from ANY other week (Handle single image moves)
-                        # NOTE: If we are accumulating, dragging FROM a week that has a collage... 
-                        # simpler to just assume we are dragging a SINGLE image from source for now as per "User Flow".
-                        # But if we drag from another week, we treat it as "moving that image".
-                        
-                        for k, v in list(state['weeks_data'].items()):
-                            if v == dragged and k != w:
-                                state['weeks_data'][k] = None
-                                # Remove from originals too if it was single? 
-                                # Complicated. Let's assume for now we only support 'Simple Move' or 'Source Drop'.
-                                if k in state['weeks_originals'] and dragged in state['weeks_originals'][k]:
-                                     state['weeks_originals'][k].remove(dragged)
+                        # 1. Figure out which photos are moving. Dragging a collage
+                        # thumbnail (a generated temp file, not one of the originals)
+                        # moves all of that week's photos.
+                        moved = [dragged]
+                        for k in list(state['weeks_data'].keys()):
+                            if k != w and state['weeks_data'][k] == dragged:
+                                originals_k = state['weeks_originals'].get(k, [])
+                                if dragged not in originals_k:
+                                    if originals_k:
+                                        moved = list(originals_k)
+                                    else:
+                                        state['weeks_data'][k] = None
+                                break
+
+                        # 2. Remove the moved photos from the source list and any other week
+                        for img in moved:
+                            if img in state['images']:
+                                state['images'].remove(img)
+                            for k in list(state['weeks_originals'].keys()):
+                                if k != w and img in state['weeks_originals'][k]:
+                                    state['weeks_originals'][k].remove(img)
+                                    refresh_week_display(k)
 
                         # 3. Add to New Week (Accumulate)
-                        current_originals = state['weeks_originals'].get(w, [])
-                        
-                        # Avoid duplicates
-                        if dragged not in current_originals:
-                            current_originals.append(dragged)
-                            
-                        state['weeks_originals'][w] = current_originals
-                        
+                        current_originals = state['weeks_originals'].setdefault(w, [])
+                        added = False
+                        for img in moved:
+                            # Avoid duplicates; never adopt a generated collage file as a photo
+                            if img not in current_originals and img.parent.name != 'temp_collages':
+                                current_originals.append(img)
+                                added = True
+
                         # 4. Determine Display Image
-                        if len(current_originals) == 1:
-                            # Standard Single Image
-                            state['weeks_data'][w] = current_originals[0]
-                        else:
-                            # Generate Collage
-                            ui.notify(f'Generating collage for {len(current_originals)} images...')
-                            
-                            # Clean up old config if we are effectively resetting/adding
-                            # Actually, should we preserve config? If adding a new image, layout changes.
-                            # Simpler to reset config on drop.
-                            if w in state['weeks_collage_config']:
-                                del state['weeks_collage_config'][w]
-                                
-                            collage_path = generate_collage(current_originals, Path(state['source_folder']))
-                            state['weeks_data'][w] = collage_path
-                        
+                        if added:
+                            if len(current_originals) > 1:
+                                ui.notify(f'Generating collage for {len(current_originals)} images...')
+                            # Layout changes when the photo count changes, so drop saved adjustments
+                            state['weeks_collage_config'].pop(w, None)
+                            refresh_week_display(w)
+
                         # 5. Global Refresh to ensure UI consistency
                         # This is slightly heavier but guarantees 0 duplication visual bugs
                         refresh_grid_ui()
                         refresh_drawer_ui()
 
                         ui.notify(f'Assigned to Week {w}')
-                        state['dragged_image'] = None
-                        state['drag_source'] = None
+                        clear_drag_state()
 
                 # drop_card.on('dragover', on_dragover) # Removed server-side handler
                 drop_card.on('drop', on_drop)
@@ -411,55 +471,56 @@ def refresh_grid_ui():
 
 # --- Processing Logic ---
 
+def get_sorted_folder() -> Path:
+    return Path(state['source_folder']) / f"Sorted_{state['year']}"
+
+def export_week(w_num: int, sorted_folder: Path):
+    """Exports one week's display image as Sorted_<year>/NNN.jpg."""
+    img_path = state['weeks_data'].get(w_num)
+    if not img_path:
+        return
+
+    # Target Name: 001.jpg, 053.jpg
+    target_path = sorted_folder / f"{w_num:03d}.jpg"
+
+    with Image.open(img_path) as im:
+        # Apply EXIF rotation so portrait phone photos aren't sideways
+        im = ImageOps.exif_transpose(im)
+
+        # Convert to RGB if necessary (e.g. from RGBA or CMYK)
+        if im.mode != 'RGB':
+            im = im.convert('RGB')
+
+        im.save(target_path, 'JPEG', quality=95)
+
 def process_and_organize():
     if not state['weeks_data']:
         ui.notify('No photos assigned to weeks!', type='warning')
         return
-        
+
     folder = Path(state['source_folder'])
-    if not folder.exists(): 
+    if not folder.exists():
         ui.notify('Source folder seems missing.')
         return
-        
-    sorted_folder = folder / f"Sorted_{state['year']}"
+
+    sorted_folder = get_sorted_folder()
     sorted_folder.mkdir(exist_ok=True)
-    
+
     count = 0
     for w_num, img_path in state['weeks_data'].items():
         if not img_path: continue
-        
-        # Target Name: 001.jpg, 053.jpg
-        new_name = f"{w_num:03d}.jpg"
-        target_path = sorted_folder / new_name
-        
         try:
-            # Open and Convert
-            with Image.open(img_path) as im:
-                # Convert to RGB if necessary (e.g. from RGBA or CMYK)
-                if im.mode in ('RGBA', 'P'):
-                    im = im.convert('RGB')
-                    
-                im.save(target_path, 'JPEG', quality=95)
-                count += 1
-                
+            export_week(w_num, sorted_folder)
+            count += 1
         except Exception as e:
             ui.notify(f"Error processing Week {w_num}: {e}", type='negative')
-    
+
     ui.notify(f"Success! Processed {count} files into {sorted_folder.name}", type='positive')
     # Open folder
     # os.system(f'open "{sorted_folder}"') # Mac specific
     
     
 # --- Main Layout ---
-
-# Setup Static Files for displaying images roughly? 
-# Warning: Exposing root / is dangerous on web, but okay for local desktop tool.
-app.add_static_files('/files', '/') 
-# Fix path mapping for Windows/Mac to use '/files/Users/...' if needed.
-# For simplicity in NiceGUI, ui.image(path) works with local paths in native mode usually, 
-# but in browser mode it needs serving.
-# We will trust ui.image(path) handles local files in native desktop mode correctly or standard mode.
-# If not, we might need a transformer.
 
 with ui.column().classes('w-full h-screen p-0'):
     
@@ -479,12 +540,11 @@ with ui.column().classes('w-full h-screen p-0'):
              ui.notify("Error: Preview dialog not initialized", type='negative')
 
     # --- Collage Editor ---
-    from nicegui.events import MouseEventArguments, ValueChangeEventArguments
-    
     # We maintain a reference to the active editor state
     editor_state = {
         'week_num': None,
         'images': [], # list of paths
+        'img_sizes': [], # (w, h) per image, after EXIF rotation
         'temp_configs': [], # list of {zoom, center_x, center_y}
         'spacing': 0,
         'dialog': None,
@@ -515,50 +575,38 @@ with ui.column().classes('w-full h-screen p-0'):
         
         editor_state['temp_configs'] = []
         editor_state['current_pan'] = []
-        
+        editor_state['img_sizes'] = []
+
         # Calculate in thread to avoid blocking
         loop = asyncio.get_running_loop()
-        
-        async def calculate_pan(idx, img_path, cfg):
-            try:
-                def _get_size():
-                    with Image.open(img_path) as img:
-                        return img.size
-                
-                w, h = await loop.run_in_executor(None, _get_size)
-                
-                zoom = cfg['zoom']
-                cx = cfg['center_x']
-                cy = cfg['center_y']
-                
-                # Logic: tx = (0.5 - cx) * w 
-                # (We don't multiply by zoom here because CSS scale handles that separately?)
-                # Actually, if we scale, the translation is also scaled if applied before?
-                # CSS: transform: translate(tx, ty) scale(zoom).
-                # Matrix: Translate first, then Scale. 
-                # So tx is in unscaled pixels.
-                tx = (0.5 - cx) * w 
-                ty = (0.5 - cy) * h
-                return [tx, ty]
-            except Exception as e:
-                print(f"Error reading image {img_path}: {e}")
-                return [0, 0]
+        qty = len(originals)
 
-        for i in range(len(originals)):
+        for i in range(qty):
             if i < len(existing_slots):
                 cfg = existing_slots[i].copy()
             else:
                 cfg = {'center_x': 0.5, 'center_y': 0.5, 'zoom': 1.0}
             editor_state['temp_configs'].append(cfg)
-            
-            pan = await calculate_pan(i, originals[i], cfg)
-            editor_state['current_pan'].append(pan)
+
+            try:
+                w, h = await loop.run_in_executor(None, get_display_size, originals[i])
+
+                # The preview image covers its slot, so one source pixel spans
+                # s_cover * zoom preview pixels. CSS applies translate(tx, ty)
+                # scale(zoom), i.e. tx is in unscaled slot pixels.
+                slot_w, slot_h = get_editor_slot_dims(qty, editor_state['spacing'], i)
+                s_cover = max(slot_w / w, slot_h / h)
+                tx = (0.5 - cfg['center_x']) * w * s_cover * cfg['zoom']
+                ty = (0.5 - cfg['center_y']) * h * s_cover * cfg['zoom']
+                editor_state['img_sizes'].append((w, h))
+                editor_state['current_pan'].append([tx, ty])
+            except Exception as e:
+                print(f"Error reading image {originals[i]}: {e}")
+                editor_state['img_sizes'].append(None)
+                editor_state['current_pan'].append([0, 0])
 
         render_editor_content.refresh()
-        if 'editor_dialog' in locals() or 'editor_dialog' in globals():
-             editor_dialog.open()
-        elif editor_state['dialog']:
-             editor_state['dialog'].open()
+        editor_dialog.open()
 
     def render_editor_layout(container):
         with container:
@@ -568,11 +616,10 @@ with ui.column().classes('w-full h-screen p-0'):
             # Reset UI refs
             editor_state['image_elements'] = [None] * qty
             
-            # Fixed aspect ratio container 4:3
-            # We used 1600x1200. Let's use 800x600 px for editor, or % based.
-            # Using specific px makes translation math easier.
-            W_preview = 800
-            H_preview = 600
+            # Fixed aspect ratio container 4:3, scaled down from the
+            # 1600x1200 output. Specific px makes translation math easier.
+            W_preview = EDITOR_W
+            H_preview = EDITOR_H
             
             with ui.element('div').style(f'width: {W_preview}px; height: {H_preview}px; background: white; position: relative;') as canvas:
                 
@@ -584,97 +631,89 @@ with ui.column().classes('w-full h-screen p-0'):
                         img_path = editor_state['images'][idx]
                         tx, ty = editor_state['current_pan'][idx]
                         zoom = editor_state['temp_configs'][idx]['zoom']
-                        
-                        # Fix visibility: convert path to served URL
-                        # app.add_static_files('/files', '/') maps root.
-                        # Using /files + absolute path should work robustly.
-                        # Also handle Windows paths if needed, but User is on Mac.
-                        src_url = f"/files{img_path}"
-                        
-                        # Image inside
-                        im = ui.image(src_url).classes('w-full h-full object-cover').style(f'transform: translate({tx}px, {ty}px) scale({zoom}); transform-origin: center center; cursor: grab;')
+
+                        # Size the element to the full cover-scaled photo (not the
+                        # slot), centered, so panning reveals real photo content
+                        # beyond the slot edges — matching the generated collage.
+                        # Pass the Path directly so NiceGUI serves it itself
+                        # (handles spaces/special chars in paths).
+                        size = editor_state['img_sizes'][idx]
+                        if size:
+                            img_w, img_h = size
+                            s_cover = max(w / img_w, h / img_h)
+                            content_w = img_w * s_cover
+                            content_h = img_h * s_cover
+                            sizing = (f'position: absolute; left: 50%; top: 50%; '
+                                      f'width: {content_w}px; height: {content_h}px; '
+                                      f'margin-left: {-content_w / 2}px; margin-top: {-content_h / 2}px;')
+                            im = ui.image(img_path).style(sizing)
+                        else:
+                            im = ui.image(img_path).classes('w-full h-full')
+                        im.style(f'transform: translate({tx}px, {ty}px) scale({zoom}); transform-origin: center center; cursor: grab;')
                         im.props('draggable="false"') # Prevent native ghost drag
-                        
-                        # DEBUG: Visual fallback if image missing
-                        with im:
-                             ui.label(f"IMG {idx}").classes('bg-white text-xs opacity-50 absolute top-0 left-0')
-                        im.props('draggable="false"') # Prevent native ghost drag
-                        
+
                         editor_state['image_elements'][idx] = im
 
                         # Interaction Handlers
-                        def handle_mousedown(e: MouseEventArguments, i=idx):
+                        # Generic .on() events deliver a GenericEventArguments whose
+                        # payload lives in e.args (clientX, deltaY, ...), not as attributes.
+                        def handle_mousedown(e, i=idx):
                             editor_state['dragging_idx'] = i
-                            editor_state['drag_start'] = (e.client_x, e.client_y)
-                            
-                        def handle_mousemove(e: MouseEventArguments):
-                            # Throttle?
+                            editor_state['drag_start'] = (e.args['clientX'], e.args['clientY'])
+
+                        def handle_mousemove(e):
                             i = editor_state['dragging_idx']
                             if i is not None:
-                                dx = e.client_x - editor_state['drag_start'][0]
-                                dy = e.client_y - editor_state['drag_start'][1]
-                                
+                                dx = e.args['clientX'] - editor_state['drag_start'][0]
+                                dy = e.args['clientY'] - editor_state['drag_start'][1]
+
                                 # Update Pan
                                 c_pan = editor_state['current_pan'][i]
                                 c_pan[0] += dx
                                 c_pan[1] += dy
-                                
-                                editor_state['drag_start'] = (e.client_x, e.client_y)
-                                
+
+                                editor_state['drag_start'] = (e.args['clientX'], e.args['clientY'])
+
                                 # Update UI
                                 update_slot_transform(i)
-                        
-                        def handle_mouseup(e: MouseEventArguments):
+
+                        def handle_mouseup(e):
                             editor_state['dragging_idx'] = None
 
-                        # Scroll for Zoom
-                        # Note: NiceGUI implementation of 'wheel' might be tricky on all elements.
-                        # check modifiers for Cmd/Ctrl
-                        async def handle_wheel(e: MouseEventArguments, i=idx):
-                            # e.delta_y
-                            if e.modifiers.ctrl or e.modifiers.meta: # Meta is Cmd on Mac
-                                # Zoom
+                        # Scroll for Zoom (Ctrl/Cmd + wheel)
+                        def handle_wheel(e, i=idx):
+                            if e.args.get('ctrlKey') or e.args.get('metaKey'):  # Meta is Cmd on Mac
                                 current_zoom = editor_state['temp_configs'][i]['zoom']
-                                # Zoom factor
-                                factor = 0.95 if e.delta_y > 0 else 1.05
+                                factor = 0.95 if e.args['deltaY'] > 0 else 1.05
                                 new_zoom = max(0.1, min(5.0, current_zoom * factor))
                                 editor_state['temp_configs'][i]['zoom'] = new_zoom
                                 update_slot_transform(i)
-                        
-                        # Bind events to the SLOT container for easier catching, or Image?
-                        # Image is better as it is the target.
-                        im.on('mousedown', handle_mousedown)
-                        # Mouse move needs to be on global or dialog? 
-                        # Ideally on the image, but if we drag fast we lose it.
-                        # Put mouseup/move on the main dialog card or document?
-                        # For now put on Image, but user has to be careful.
-                        # Better: Put move/up on the canvas or slot.
-                        slot.on('mousemove', handle_mousemove)
+
+                        im.on('mousedown', handle_mousedown, args=['clientX', 'clientY'])
+                        # Move/up on the slot so fast drags aren't lost; throttle to
+                        # keep the websocket traffic reasonable.
+                        slot.on('mousemove', handle_mousemove, args=['clientX', 'clientY'], throttle=0.05)
                         slot.on('mouseup', handle_mouseup)
                         slot.on('mouseleave', handle_mouseup) # Safety
-                        # Wheel on slot
-                        slot.on('wheel', lambda e, i=idx: handle_wheel(e, i)) 
-                        # Prevent default scroll behavior logic is hard in pure python event unless we use client script.
-                        # slot.on('wheel.prevent', ...)
+                        # .prevent stops the page from scrolling while zooming
+                        slot.on('wheel.prevent', handle_wheel, args=['deltaY', 'ctrlKey', 'metaKey'])
                         
                         
                 # Define Geometry based on Qty & Spacing
-                # Note: We scale Spacing down by 0.5 (800 vs 1600)
-                sp = spacing / 2.0 
-                
+                sp = spacing * PREVIEW_SCALE
+
                 if qty == 2:
-                    w = (W_preview - sp) / 2
-                    create_slot(0, 0, 0, w, H_preview)
-                    create_slot(1, w + sp, 0, w, H_preview)
+                    w, h = get_editor_slot_dims(qty, spacing, 0)
+                    create_slot(0, 0, 0, w, h)
+                    create_slot(1, w + sp, 0, w, h)
                 elif qty == 3:
-                    w_left = (W_preview - sp) / 2
-                    h_top = (H_preview - sp) / 2
+                    w_left, _ = get_editor_slot_dims(qty, spacing, 0)
+                    _, h_top = get_editor_slot_dims(qty, spacing, 1)
                     create_slot(0, 0, 0, w_left, H_preview)
                     create_slot(1, w_left + sp, 0, w_left, h_top)
                     create_slot(2, w_left + sp, h_top + sp, w_left, h_top)
                 elif qty >= 4:
-                     w = (W_preview - sp) / 2
-                     h = (H_preview - sp) / 2
+                     w, h = get_editor_slot_dims(qty, spacing, 0)
                      create_slot(0, 0, 0, w, h)
                      create_slot(1, w + sp, 0, w, h)
                      create_slot(2, 0, h + sp, w, h)
@@ -691,80 +730,83 @@ with ui.column().classes('w-full h-screen p-0'):
         ui.notify('Saving collage...')
         w_num = editor_state['week_num']
         originals = editor_state['images']
-        
-        # 1. Convert Pan/Zoom back to normalized CenterX/Y
+        qty = len(originals)
+        spacing = editor_state['spacing']
+
+        # 1. Convert Pan/Zoom back to normalized CenterX/Y.
+        # Inverse of calculate_pan: the preview image covers its slot
+        # (object-fit: cover), so one source pixel spans s_cover * zoom
+        # preview pixels, and cx = 0.5 - tx / (orig_w * s_cover * zoom).
         final_configs = []
         for i, config_data in enumerate(editor_state['temp_configs']):
             tx, ty = editor_state['current_pan'][i]
             zoom = config_data['zoom']
-            
-            # Need Image Dimensions
-            # We assume the image loaded in slot is roughly "covered".
-            # The reverse math: tx = (0.5 - cx) * W_img
-            # So cx = 0.5 - (tx / W_img)
-            # We need to open image again to know W/H.
+
             try:
-                with Image.open(originals[i]) as img:
-                    orig_w, orig_h = img.size
-                    
-                    # Correction:
-                    # Our preview is scaled down. 1600x1200 -> 800x600 (0.5 scale).
-                    # The tx, ty we have are in PREVIEW pixels.
-                    # We need to scale them UP to match full resolution if we use full res W_img.
-                    # Scale Factor = 2.0.
-                    
-                    real_tx = tx * 2.0
-                    real_ty = ty * 2.0
-                    
-                    # BUT: CSS translate applies to the element. 
-                    # If we have `object-cover` in HTML `img`, the image is resized to the slot.
-                    # The translation moves the *img element itself* or the *content*?
-                    # `ui.image` creates an `img` tag. 
-                    # `object-fit: cover` makes the image fill the box.
-                    # `transform` moves the *whole box*? 
-                    # If we move the whole box, we are seeing outside the slot (because slot has overflow-hidden).
-                    # So yes, we are moving the image relative to the viewing window.
-                    
-                    # MATH:
-                    # If I move 10px in preview, that corresponds to moving the center 10px.
-                    # But 10px in preview (which is 800px wide total) is 1/80 of width.
-                    # In real image (1600px wide total), it is 20px.
-                    # So yes, Scale Factor 2.0 applies.
-                    
-                    cx = 0.5 - (real_tx / orig_w)
-                    cy = 0.5 - (real_ty / orig_h)
-                    
-                    final_configs.append({
-                        'center_x': cx,
-                        'center_y': cy,
-                        'zoom': zoom
-                    })
+                orig_w, orig_h = get_display_size(originals[i])
+                slot_w, slot_h = get_editor_slot_dims(qty, spacing, i)
+                s_cover = max(slot_w / orig_w, slot_h / orig_h)
+
+                cx = 0.5 - tx / (orig_w * s_cover * zoom)
+                cy = 0.5 - ty / (orig_h * s_cover * zoom)
+
+                # Clamp the crop window inside the photo, mirroring the
+                # generator, so reopening the editor matches the output
+                target_aspect = slot_w / slot_h
+                if orig_w / orig_h > target_aspect:
+                    vis_w = orig_h * target_aspect / zoom
+                    vis_h = orig_h / zoom
+                else:
+                    vis_w = orig_w / zoom
+                    vis_h = (orig_w / target_aspect) / zoom
+
+                if vis_w < orig_w:
+                    half = (vis_w / 2) / orig_w
+                    cx = min(max(cx, half), 1 - half)
+                else:
+                    cx = 0.5
+                if vis_h < orig_h:
+                    half = (vis_h / 2) / orig_h
+                    cy = min(max(cy, half), 1 - half)
+                else:
+                    cy = 0.5
+
+                final_configs.append({
+                    'center_x': cx,
+                    'center_y': cy,
+                    'zoom': zoom
+                })
             except Exception as e:
                 print(f"Error calcing config for {i}: {e}")
                 final_configs.append({'center_x': 0.5, 'center_y': 0.5, 'zoom': 1.0})
-        
-        # 2. Update State
+
+        # 2. Update State & Regenerate
         state['weeks_collage_config'][w_num] = {
-            'spacing': editor_state['spacing'],
+            'spacing': spacing,
             'slots': final_configs
         }
-        
-        # 3. Regenerate
-        collage_path = generate_collage(
-            originals, 
-            Path(state['source_folder']), 
-            spacing=state['weeks_collage_config'][w_num]['spacing'],
-            slot_configs=final_configs
-        )
-        state['weeks_data'][w_num] = collage_path
-        
+        refresh_week_display(w_num)
+
         refresh_grid_ui()
         if editor_state['dialog']:
             editor_state['dialog'].close()
         ui.notify('Collage updated!')
 
+        # 3. If this week was already exported, update the exported file too
+        sorted_folder = get_sorted_folder()
+        target = sorted_folder / f"{w_num:03d}.jpg"
+        if target.exists():
+            try:
+                export_week(w_num, sorted_folder)
+                ui.notify(f'Updated {sorted_folder.name}/{target.name}', type='positive')
+            except Exception as e:
+                ui.notify(f'Could not update {target.name}: {e}', type='negative')
+
     # 3. Define the Dialog ONCE (Global Scope in layout)
-    with ui.dialog() as editor_dialog, ui.card().classes('w-full max-w-7xl h-[90vh] p-0 flex flex-col'):
+    # 'no-wrap' is essential: Quasar's .flex class adds flex-wrap: wrap, which
+    # in short windows wraps the canvas into a second column off-screen,
+    # making the dialog look blank.
+    with ui.dialog() as editor_dialog, ui.card().classes('w-full max-w-7xl h-[90vh] p-0 flex flex-col no-wrap'):
          editor_state['dialog'] = editor_dialog
          
          # Header
@@ -800,8 +842,14 @@ with ui.column().classes('w-full h-screen p-0'):
     with ui.row().classes('w-full bg-blue-100 p-4 items-center gap-4'):
         ui.label('Weekly Photo Organizer').classes('text-xl font-bold text-blue-900')
         
-        ui.number(label='Year', value=state['year'], format='%.0f', 
-                  on_change=lambda e: (state.update({'year': int(e.value)}), refresh_grid_ui())).classes('w-24')
+        def on_year_change(e):
+            if e.value is None:
+                return
+            state['year'] = int(e.value)
+            refresh_grid_ui()
+
+        year_input = ui.number(label='Year', value=state['year'], format='%.0f',
+                               on_change=on_year_change).classes('w-24')
         
 
         async def pick_folder():
@@ -865,5 +913,4 @@ with ui.column().classes('w-full h-screen p-0'):
 # Start the App
 if __name__ in {"__main__", "__mp_main__"}:
     # Note: 'native=True' creates a standalone window.
-    # We use a relaxed approach for file serving if needed.
     ui.run(title='Weekly Photo Organizer', native=True, window_size=(1200, 800))
